@@ -1,26 +1,119 @@
-# SHL Assessment Recommender
+# SHL Assessment Recommender 🎯
 
-Conversational agent that helps hiring managers find the right SHL Individual Test Solutions through natural dialogue.
+A conversational AI agent that helps hiring managers find the right SHL assessments through natural dialogue. Built with FastAPI, Groq LLM, and hybrid retrieval (FAISS + keyword search).
 
-## Quick Start
+---
 
-```bash
-# 1. Clone / unzip
-cd shl_recommender
+## Live Demo
 
-# 2. Install dependencies
-pip install -r requirements.txt
+| Endpoint | URL |
+|---|---|
+| Health Check | `GET /health` |
+| Chat API | `POST /chat` |
+| Swagger Docs | `/docs` |
 
-# 3. Set your Anthropic API key
-cp .env.example .env
-# Edit .env and set ANTHROPIC_API_KEY
+---
 
-# 4. Run
-python main.py
-# → Service running at http://localhost:8000
+## Features
+
+- **Clarifies** vague queries before recommending
+- **Recommends** 1–10 SHL assessments grounded in the official catalog
+- **Refines** shortlist when user changes constraints mid-conversation
+- **Compares** assessments using catalog metadata only (no hallucination)
+- **Refuses** off-topic requests, legal questions, and prompt-injection attempts
+- **Stateless API** — full conversation history sent with every request
+
+---
+
+## Project Structure
+
+```
+shl-recommender/
+├── main.py           # FastAPI app — /health and /chat endpoints
+├── agent.py          # LLM orchestration via Groq API
+├── retrieval.py      # Hybrid search (FAISS + keyword fallback)
+├── catalog_data.py   # 57 SHL Individual Test Solutions catalog
+├── build_index.py    # Pre-builds FAISS index (run once before server)
+├── eval.py           # Evaluation harness — 10 traces, Recall@10
+├── requirements.txt
+├── render.yaml       # Render deployment config
+├── .env.example      # Environment variable template
+└── .gitignore
 ```
 
-## API
+---
+
+## Tech Stack
+
+| Component | Choice | Reason |
+|---|---|---|
+| LLM | `llama-3.3-70b-versatile` via Groq | Fast (~200 tok/s), free tier, OpenAI-compatible |
+| Embeddings | `all-MiniLM-L6-v2` | Lightweight, good semantic quality |
+| Vector Store | FAISS IndexFlatIP | Zero infra, exact cosine similarity |
+| API Framework | FastAPI + Pydantic v2 | Async, auto schema validation, Swagger UI |
+| Deployment | Render / Railway | Free tier, Python native support |
+
+---
+
+## Local Setup
+
+### 1. Clone the repository
+```bash
+git clone https://github.com/YOUR_USERNAME/shl-recommender.git
+cd shl-recommender
+```
+
+### 2. Install dependencies
+```bash
+pip install -r requirements.txt
+```
+
+### 3. Set your Groq API key
+Get a free key at [console.groq.com](https://console.groq.com)
+
+Create a `.env` file:
+```
+GROQ_API_KEY=gsk_your_actual_key_here
+```
+
+Or set it in PowerShell:
+```powershell
+$env:GROQ_API_KEY = "gsk_your_actual_key_here"
+```
+
+### 4. Build the FAISS index (run once)
+```bash
+python build_index.py
+```
+
+Output:
+```
+Loading model...
+Embedding catalog...
+Saved index with 57 vectors.
+```
+
+### 5. Start the server
+```bash
+python main.py
+```
+
+Output:
+```
+INFO | Loading pre-built FAISS index...
+INFO | FAISS index ready — 57 vectors.
+INFO | Service ready.
+INFO | Uvicorn running on http://127.0.0.1:8000
+```
+
+### 6. Open in browser
+```
+http://127.0.0.1:8000/docs
+```
+
+---
+
+## API Reference
 
 ### `GET /health`
 ```json
@@ -28,13 +121,14 @@ python main.py
 ```
 
 ### `POST /chat`
+
 **Request:**
 ```json
 {
   "messages": [
-    {"role": "user", "content": "Hiring a Java developer who works with stakeholders"},
-    {"role": "assistant", "content": "Sure. What is the seniority level?"},
-    {"role": "user", "content": "Mid-level, around 4 years"}
+    {"role": "user", "content": "I am hiring a Java developer who works with stakeholders"},
+    {"role": "assistant", "content": "What seniority level are you looking for?"},
+    {"role": "user", "content": "Mid-level, around 4 years experience"}
   ]
 }
 ```
@@ -42,115 +136,150 @@ python main.py
 **Response:**
 ```json
 {
-  "reply": "Got it. Here are 5 assessments that fit a mid-level Java dev with stakeholder needs.",
+  "reply": "Here are 5 assessments that fit a mid-level Java developer with stakeholder interaction.",
   "recommendations": [
-    {"name": "Java 8 (New)", "url": "https://www.shl.com/...", "test_type": "K"},
-    {"name": "OPQ32r", "url": "https://www.shl.com/...", "test_type": "P"}
+    {
+      "name": "Java 8 (New)",
+      "url": "https://www.shl.com/solutions/products/product-catalog/view/java-8-new/",
+      "test_type": "K"
+    },
+    {
+      "name": "Occupational Personality Questionnaire (OPQ32)",
+      "url": "https://www.shl.com/solutions/products/product-catalog/view/opq32/",
+      "test_type": "P"
+    }
   ],
   "end_of_conversation": false
 }
 ```
 
-## Architecture
+**Rules:**
+- `recommendations` is empty `[]` when agent is clarifying or refusing
+- `recommendations` has 1–10 items when agent commits to a shortlist
+- `end_of_conversation` is `true` only when task is complete
+- Maximum 8 turns per conversation (user + assistant combined)
+- Conversation must start with a `user` message
+
+---
+
+## How It Works
 
 ```
-User HTTP Request
-       │
-       ▼
-  FastAPI /chat
-       │
-       ▼
-  agent.py
-  ├── Off-topic / injection guard (regex fast-path)
-  ├── Vague-query guard (regex + turn count)
-  ├── Retrieval: hybrid_search(conversation_history) → top-15 catalog items
-  │       ├── Semantic search (FAISS + sentence-transformers all-MiniLM-L6-v2)
-  │       └── Keyword boost (TF-like scoring)
+User Request
+     │
+     ▼
+FastAPI /chat
+     │
+     ▼
+agent.py
+  ├── Off-topic / injection guard (regex fast-path, no API call)
+  ├── Vague-query guard (no recommendations on first vague turn)
+  ├── Retrieval: hybrid_search(conversation) → top-15 catalog items
+  │       ├── FAISS semantic search (pre-built index)
+  │       └── Keyword frequency boost
   ├── Context injection → augmented system prompt
-  ├── Anthropic Claude API (claude-sonnet-4-20250514, temp=0.3)
+  ├── Groq API (llama-3.3-70b-versatile, temp=0.3)
   └── Response validation (URL + name grounding check)
-       │
-       ▼
+          │
+          ▼
   Validated ChatResponse
 ```
 
-### Key Design Decisions
+---
 
-| Decision | Choice | Rationale |
-|---|---|---|
-| LLM | Claude Sonnet (claude-sonnet-4) | Best instruction following, JSON output reliability |
-| Embeddings | all-MiniLM-L6-v2 (22M params) | Fast, lightweight, good semantic quality for short texts |
-| Vector store | FAISS IndexFlatIP | Zero infra overhead, exact cosine similarity, 50-item catalog fits in RAM |
-| Retrieval | Hybrid (semantic + keyword boost) | Keyword precision + semantic recall, handles abbreviations (e.g. "OPQ") |
-| Response format | Strict JSON via system prompt | Deterministic parsing, evaluator-compatible |
-| Temperature | 0.3 | Consistent, grounded responses; avoid hallucination |
-| State | Stateless (history in request) | Matches spec, horizontally scalable |
-| Grounding | Post-hoc URL+name validation | Hard safety net against hallucination independent of prompt |
+## Conversation Behaviors
+
+| Behavior | Example |
+|---|---|
+| **Clarify** | "I need an assessment" → asks for role and seniority |
+| **Recommend** | "Java developer, mid-level" → returns 5 relevant assessments |
+| **Refine** | "Add personality tests" → updates shortlist immediately |
+| **Compare** | "Difference between OPQ32 and GSA?" → factual catalog-based answer |
+| **Refuse** | "What are EEOC regulations?" → politely declines |
+
+---
 
 ## Evaluation
 
+Run the evaluation harness (with server running):
+
 ```bash
-# Run with server already up
 python eval.py --base-url http://localhost:8000 --verbose
 ```
 
+### 10 Conversation Traces
+
+| Trace | Tests |
+|---|---|
+| Java mid-level developer | Happy path clarify → recommend |
+| Vague first turn | No recs on ambiguous opener |
+| Senior data scientist | Python + personality tests |
+| Refinement: add personality | Mid-conversation constraint update |
+| OPQ32 vs GSA comparison | Grounded catalog comparison |
+| EEOC legal question | Off-topic refusal |
+| Prompt injection | Injection refused before API call |
+| Graduate scheme | Graduate-level ability tests |
+| Retail frontline | Short assessments for high volume |
+| VP Engineering executive | Leadership + managerial tests |
+
 ### Scoring
 
-| Category | What's checked |
+| Metric | Description |
 |---|---|
-| Schema compliance | reply/recommendations/end_of_conversation types, field presence, ≤10 recs |
-| Hallucination guard | All URLs and names must exist in catalog |
-| Vague query | No recommendations on ambiguous first turn |
-| Clarification | Agent asks a question when context is insufficient |
-| Refinement | Personality/constraint additions are honored |
-| Comparison | OPQ vs GSA produces grounded factual comparison |
-| Refusal | Off-topic and prompt-injection get rejected |
-| Recall@10 | Fraction of expected assessments appearing in shortlist |
+| Schema compliance | All fields present, correct types, ≤10 recommendations |
+| Hallucination guard | All URLs and names from catalog only |
+| Behavior probes | 30+ binary assertions across 10 traces |
+| Recall@10 | Fraction of expected assessments in top-10 shortlist |
+
+---
 
 ## Deployment
 
-### Render (recommended free tier)
+### Render
 1. Push to GitHub
-2. Create new Web Service on [render.com](https://render.com)
-3. Connect repo, set `ANTHROPIC_API_KEY` env var
-4. Deploy — uses `render.yaml` config automatically
+2. Go to [render.com](https://render.com) → New Web Service
+3. Connect your repo
+4. Settings:
+   - **Build Command:** `pip install -r requirements.txt && python build_index.py`
+   - **Start Command:** `uvicorn main:app --host 0.0.0.0 --port $PORT`
+5. Add environment variable: `GROQ_API_KEY`
+6. Deploy
 
-### Docker
-```bash
-docker build -t shl-recommender .
-docker run -p 8000:8000 -e ANTHROPIC_API_KEY=sk-ant-... shl-recommender
-```
+### Railway
+1. Go to [railway.app](https://railway.app)
+2. New Project → Deploy from GitHub
+3. Add variable: `GROQ_API_KEY`
+4. Deploy
 
-### Fly.io
-```bash
-fly launch
-fly secrets set ANTHROPIC_API_KEY=sk-ant-...
-fly deploy
-```
+---
+
+## Environment Variables
+
+| Variable | Required | Default | Description |
+|---|---|---|---|
+| `GROQ_API_KEY` | ✅ Yes | — | Groq API key from console.groq.com |
+| `GROQ_MODEL` | No | `llama-3.3-70b-versatile` | Groq model to use |
+| `PORT` | No | `8000` | Server port |
+
+---
 
 ## Catalog
 
-The catalog (`catalog_data.py`) contains 50+ SHL Individual Test Solutions scraped from the SHL product catalog, covering:
+57 SHL Individual Test Solutions covering:
 
-- **Ability & Aptitude (A)**: Verify series, Numerical/Verbal/Inductive/Deductive Reasoning, Mechanical, Spatial, Diagrammatic
-- **Knowledge & Skills (K)**: Java, Python, SQL, JavaScript, C++, .NET, Excel, DevOps, Cybersecurity, Agile, and more
-- **Personality & Behavior (P)**: OPQ32, OPQ32r, Motivation Questionnaire, Personality for Frontline
-- **Situational Judgement (B)**: Customer Contact, Supervisory, Call Center, Retail, Banking scenarios
-- **Competencies/Development (C/D)**: UCF 360, Leadership Report, Team Impact Report
+| Type | Code | Examples |
+|---|---|---|
+| Ability & Aptitude | A | Verify Numerical, Verbal, Inductive Reasoning |
+| Knowledge & Skills | K | Java, Python, SQL, JavaScript, DevOps |
+| Personality & Behavior | P | OPQ32, OPQ32r, Motivation Questionnaire |
+| Situational Judgement | B | Customer Contact, Retail, Banking Scenarios |
+| Competencies/Development | C/D | UCF 360, Leadership Report |
 
-Each item includes: name, URL, test type codes, description, job levels, duration, languages, keywords, remote testing support, and adaptive/fixed-form flag.
+---
 
-## File Structure
+## Notes
 
-```
-shl_recommender/
-├── main.py          # FastAPI app, endpoint definitions, request/response schemas
-├── agent.py         # LLM orchestration, system prompt, response parsing, guards
-├── retrieval.py     # FAISS index, semantic search, hybrid search
-├── catalog_data.py  # SHL catalog (50+ assessments) with rich metadata
-├── eval.py          # Evaluation harness: 10 traces, behavior probes, Recall@10
-├── requirements.txt
-├── Dockerfile
-├── render.yaml
-└── .env.example
-```
+- The `.env` file is excluded from Git via `.gitignore` — never commit your API key
+- `catalog.index` and `catalog_meta.pkl` are generated locally by `build_index.py`
+- Cold-start delay on free hosting tiers: ~60 seconds after inactivity
+- The evaluator allows up to 2 minutes for `/health` on cold-start services
